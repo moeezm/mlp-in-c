@@ -12,15 +12,16 @@
 // L is number of layers
 // ETA is learning rate
 #define L 3
-#define ETA 0.35
+#define ETA 3.0
 
 #define BATCH_SIZE 10
-#define EPOCHS 30 
+#define EPOCHS 30
 
 #define TRAINING_SIZE 60000
-#define TESTING_SIZE 10000 
+#define TESTING_SIZE 10000
 
-int layer_sizes[L] = {INPUT_SIZE, 800, OUTPUT_SIZE};
+//int layer_sizes[L] = {INPUT_SIZE, 30, OUTPUT_SIZE};
+int layer_sizes[L] = {INPUT_SIZE, 100, OUTPUT_SIZE};
 
 struct Datum {
 	double input[INPUT_SIZE];
@@ -37,6 +38,30 @@ const char train_data_filename[] = "mnist_data/train-images.idx3-ubyte";
 const char train_label_filename[] = "mnist_data/train-labels.idx1-ubyte";
 const char test_data_filename[] = "mnist_data/t10k-images.idx3-ubyte";
 const char test_label_filename[] = "mnist_data/t10k-labels.idx1-ubyte";
+
+// random float between -1 and 1
+double randf() {
+	double res = (double)(rand()) / RAND_MAX;
+	return res;
+}
+
+double gen_normal() {
+	double u1 = randf();
+	double u2 = randf();
+	
+	double z0 = sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
+	return z0;
+}
+
+void print_picture(const double *arr) {
+	for (int i = 0; i < 28; i++) {
+		for (int j = 0; j < 28; j++) {
+			printf("%s ", ((arr[i*28 + j] > 0) ? "█" : "░"));
+		}
+		printf("\n");
+	}
+}
+
 // one function since training and testing are in the same format
 // n is number of images
 void read_file(struct Datum *arr, const char *data_filename, const char *label_filename, int n) {
@@ -59,7 +84,6 @@ void read_file(struct Datum *arr, const char *data_filename, const char *label_f
 	}
 	fclose(data);
 	fclose(labels);
-
 }
 	
 void init_data() {
@@ -78,11 +102,6 @@ void matmul(int m, int p, int n, const double *A, const double *B, double *C) {
 			}
 		}
 	}
-}
-
-// random float between 0 and 1
-float randf() {
-	return (float)(rand()) / RAND_MAX;
 }
 
 // answer is correct output vector for the input
@@ -114,9 +133,9 @@ void init_weights_and_biases() {
 		weights[i] = malloc(layer_sizes[i] * layer_sizes[i-1] * sizeof(double));
 		biases[i] = malloc(layer_sizes[i] * sizeof(double));
 		for (int j = 0; j < layer_sizes[i]; j++) {
-			biases[i][j] = randf() / 800;
+			biases[i][j] = gen_normal();
 			for (int k = 0; k < layer_sizes[i-1]; k++) {
-				weights[i][j*layer_sizes[i-1] + k] = randf() / 800;
+				weights[i][j*layer_sizes[i-1] + k] = gen_normal();
 			}
 		}
 	}
@@ -186,7 +205,7 @@ void calc_gradients(double *answer, double *outputs[L], double *weight_derivs[L]
 		// compute derivatives w.r.t weights/biases
 		for (int j = 0; j < layer_sizes[i]; j++) {
 			for (int k = 0; k < layer_sizes[i-1]; k++) {
-				weight_derivs[i][j*layer_sizes[i-1] + k] += error2[j] * f(outputs[i-1][k]);
+				weight_derivs[i][j*layer_sizes[i-1] + k] += error2[j] * ((i > 1) ? F(outputs[i-1][k]) : outputs[i-1][k]);
 			}
 			bias_derivs[i][j] += error2[j];
 		}
@@ -214,33 +233,48 @@ int inference(double *x) {
 // evaluate on testing data
 // returns number of correct responses
 int test() {
+	int actual_cnts[10];
+	int cnts[10];
+	memset(actual_cnts, 0, sizeof(cnts));
+	memset(cnts, 0, sizeof(cnts));
 	int correct = 0;
+	double loss = 0;
 	for (int i = 0; i < TESTING_SIZE; i++) {
 		int actual_ans = 0;
 		double best = 0;
-		for (int j = 0; j < 10; j++) {
+		for (int j = 0; j < OUTPUT_SIZE; j++) {
 			if (testing_data[i].output[j] > best) {
 				best = testing_data[i].output[j];
 				actual_ans = j;
 			}
 		}
-		int res = inference(testing_data[i].input);
+		double *outvec = malloc(layer_sizes[L-1] * sizeof(double));
+		feedforward(testing_data[i].input, outvec, false, NULL);
+		int res = 0;
+		best = 0;
+		for (int j= 0; j < layer_sizes[L-1]; j++) {
+			double diff = (outvec[j] - testing_data[i].output[j]);
+			loss += (diff * diff);
+			if (outvec[j] > best) {
+				best = outvec[j];
+				res = j;
+			}
+		}
 		correct += (res == actual_ans);
+		actual_cnts[actual_ans]++;
+		cnts[res]++;
 	}
+	printf("Loss: %f\n", loss/TESTING_SIZE);
+	printf("Actual distribution: ");
+	for (int i = 0; i < 10; i++) printf("%d ", actual_cnts[i]);
+	printf("\nOutput distribution: ");
+	for (int i = 0; i < 10; i++) printf("%d ", cnts[i]);
+	printf("\n");
 	return correct;
 }
 
 // implement stochastic gradient descent for one epoch
 void epoch() {
-	// print first couple of weights
-	for (int i = 1; i < 3; i++) {
-		for (int j = 0; j < 10; j++) {
-			printf("%f ", weights[i][j]);
-		}
-	}
-	printf("\n");
-
-
 	// randomly shuffle training data
 	for (int i = TRAINING_SIZE-1; i >= 1; i--) {
 		int j = rand() % i;
@@ -281,12 +315,21 @@ void epoch() {
 				weights[j][k] -= (factor * weight_derivs[j][k]);
 			}
 		}
+		//for (int j = 1; j < L; j++) {
+		//	for (int k = 0; k < layer_sizes[j] * layer_sizes[j-1]; k++) {
+		//		printf("%f ", weight_derivs[j][k]);
+		//	}
+		//	printf("\n\n\n\n");
+		//}
 	}
 	const double EPS = 1e-10;
 	bool zero = true;
 	for (int i = 1; i < L; i++) {
 		for (int j = 0; j < layer_sizes[i] * layer_sizes[i-1]; j++) {
 			if (weight_derivs[i][j] > EPS) zero = false;
+		}
+		for (int j = 0; j < layer_sizes[i]; j++) {
+			if (bias_derivs[i][j] > EPS) zero = false;
 		}
 	}
 	if (zero) {
@@ -304,19 +347,12 @@ void train() {
 	for (int i = 1; i <= EPOCHS; i++) {
 		printf("Epoch %d/%d: ", i, EPOCHS);
 		epoch();
+		//test(); 
 		int correct = test();
 		printf("%d/%d \n", correct, TESTING_SIZE);
 	}
 }
 
-void print_picture(double *arr) {
-	for (int i = 0; i < 28; i++) {
-		for (int j = 0; j < 28; j++) {
-			printf("%d ", (int)(arr[i*28 + j] > 0));
-		}
-		printf("\n");
-	}
-}
 int main() {
 	srand(time(NULL));
 
@@ -329,11 +365,6 @@ int main() {
 
 	init_data();
 	printf("Data initialized\n");
-
-	for (int i = 0; i < 10; i++) {
-		print_picture(training_data[i].input);
-		printf("\n");
-	}
 
 	init_weights_and_biases();
 	printf("Weights and biases initialized\n");
