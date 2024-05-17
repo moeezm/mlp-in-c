@@ -1,98 +1,121 @@
-#include <stdlib.h>
 #include <stdio.h>
-#include <stdbool.h>
-#include <time.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <math.h>
 
-// nn constants 
-#define INPUT_SIZE 784
-#define OUTPUT_SIZE 10
+// ==== CONSTANTS ====
+#define TRAIN_SIZE 60000
+#define TEST_SIZE 10000
 
-// L is number of layers
-// ETA is learning rate
+// number of layers
 #define L 3
-#define ETA 3.0
-
+// learning rate
+#define ETA 1.5
 #define BATCH_SIZE 10
 #define EPOCHS 30
 
-#define TRAINING_SIZE 60000
-#define TESTING_SIZE 10000
+#define INPUT_SIZE 784
+#define OUTPUT_SIZE 10
 
-//int layer_sizes[L] = {INPUT_SIZE, 30, OUTPUT_SIZE};
-int layer_sizes[L] = {INPUT_SIZE, 30, OUTPUT_SIZE};
-
+// ==== DEFINITIONS ====
 struct Datum {
 	double input[INPUT_SIZE];
 	double output[OUTPUT_SIZE];
 };
 
-struct Datum training_data[TRAINING_SIZE];
-struct Datum testing_data[TESTING_SIZE];
+// ==== GLOBAL VARIABLES ====
+const int layer_sizes[L] = {INPUT_SIZE, 30, OUTPUT_SIZE};
+double *weights[L];
+double *biases[L];
+double *errors[L];
+double *affine_outputs[L];
+double *activations[L];
+double *weight_derivs[L];
+double *bias_derivs[L];
 
-const int DATA_HEADER_SIZE = 16;
-const int LABEL_HEADER_SIZE = 8;
+struct Datum train_data[TRAIN_SIZE];
+struct Datum test_data[TEST_SIZE];
 
-const char train_data_filename[] = "mnist_data/train-images.idx3-ubyte";
-const char train_label_filename[] = "mnist_data/train-labels.idx1-ubyte";
-const char test_data_filename[] = "mnist_data/t10k-images.idx3-ubyte";
-const char test_label_filename[] = "mnist_data/t10k-labels.idx1-ubyte";
-
-// random float between -1 and 1
-double randf() {
-	double res = (double)(rand()) / RAND_MAX;
-	return res;
+// ==== RANDOM DISTRIBUTIONS ====
+// uniform [0, 1] distribution
+double randu() {
+	return (double)(rand())/RAND_MAX;
 }
 
-double gen_normal() {
-	double u1 = randf();
-	double u2 = randf();
-	
+// normal distribution with mean 0 and std dev 1
+double randn() {
+	double u1 = randu();
+	double u2 = randu();
 	double z0 = sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
 	return z0;
 }
 
-void print_picture(const double *arr) {
-	for (int i = 0; i < 28; i++) {
-		for (int j = 0; j < 28; j++) {
-			printf("%s ", ((arr[i*28 + j] > 0) ? "█" : "░"));
-		}
-		printf("\n");
+// ==== COST AND ACTIVATION ====
+double cost(const double *truth, const double *activation) {
+	double ans = 0;
+	double diff;
+	for (int i = 0; i < OUTPUT_SIZE; i++) {
+		diff = activation[i] - truth[i];
+		ans += 0.5*diff*diff;
 	}
+	return ans;
 }
 
-// one function since training and testing are in the same format
-// n is number of images
-void read_file(struct Datum *arr, const char *data_filename, const char *label_filename, int n) {
-	// no buffer :(	
-	FILE *data, *labels;
-	data = fopen(data_filename, "rb");
-	labels = fopen(label_filename, "rb");
+// derivative of cost w.r.t one activation
+double cost_deriv(double truth, double activation) {
+	return activation - truth;
+}
 
-	for (int i = 0; i < DATA_HEADER_SIZE; i++) fgetc(data);
-	for (int i = 0; i < LABEL_HEADER_SIZE; i++) fgetc(labels);
-	unsigned char vec[INPUT_SIZE];
+// f is activation function, we'll use sigmoid
+double f(double x) {
+	return 1.0 / (1.0 + exp(-x));
+}
+
+// fp is derivative of f
+double fp(double x) {
+	double y = f(x);
+	return y*(1-y);
+}
+
+// ==== DATA ====
+const char train_image_filename[] = "mnist_data/train-images.idx3-ubyte";
+const char train_label_filename[] = "mnist_data/train-labels.idx1-ubyte";
+const char test_image_filename[] = "mnist_data/t10k-images.idx3-ubyte";
+const char test_label_filename[] = "mnist_data/t10k-labels.idx1-ubyte";
+
+const int IMAGE_HEADER_SIZE = 16;
+const int LABEL_HEADER_SIZE = 8;
+
+// process data + label file for either training or test
+// load n images + labels from resp. files into arr
+void read_file(struct Datum *arr, const char image_filename[], const char label_filename[], int n) {
+	// see http://yann.lecun.com/exdb/mnist/ for file format description
+	FILE *images = fopen(image_filename, "rb");
+	FILE *labels = fopen(label_filename, "rb");
 	unsigned char c;
-	for (int i = 0; i < n; i++) {
-		fread(vec, 1, INPUT_SIZE, data);
-		c = fgetc(labels);
-		for (int j = 0; j < INPUT_SIZE; j++) {
-			if (j == (int)c) arr[i].output[(int)c] = 1.0; 
-			arr[i].input[j] = (double)vec[j] / 255;
-		}
-	}
-	fclose(data);
-	fclose(labels);
-}
+	for (int i = 0; i < IMAGE_HEADER_SIZE; i++) fgetc(images);
+	for (int i = 0; i < LABEL_HEADER_SIZE; i++) fgetc(labels);
 	
-void init_data() {
-	read_file(training_data, train_data_filename, train_label_filename, TRAINING_SIZE);
-	read_file(testing_data, test_data_filename, test_label_filename, TESTING_SIZE);
+	for (int i = 0; i < n; i++) {
+		for (int j = 0; j < INPUT_SIZE; j++) {
+			c = fgetc(images);
+			arr[i].input[j] = (double)c / 255;
+		}
+		c = fgetc(labels);
+		arr[i].output[c] = 1.0;
+	}
 }
-// calculates AB and puts it in C
-// (mxp)(pxn) = (mxn)
-// A, B, C are contiguous 1D arrays of m*p, p*n, m*n size resp., and will be used as 2D arrays
+
+void load_data() {
+	read_file(train_data, train_image_filename, train_label_filename, TRAIN_SIZE);
+	read_file(test_data, test_image_filename, test_label_filename, TEST_SIZE);
+}
+
+// ==== LIN ALG OPS ====
+// performs AB and stores in C
+// shapes: (mxp)(pxn) = (mxn)
+// A, B, and C are 1d arrays that will be treated as 2d arrays
 void matmul(int m, int p, int n, const double *A, const double *B, double *C) {
 	for (int i = 0; i < m; i++) {
 		for (int j = 0; j < n; j++) {
@@ -104,276 +127,157 @@ void matmul(int m, int p, int n, const double *A, const double *B, double *C) {
 	}
 }
 
-// answer is correct output vector for the input
-double cost(double *answer, double *activation) {
-	return 0.0;
-}
-
-// F is activation function, we'll use sigmoid
-double F(double x) {
-	return 1.0 / (1.0 + exp(-x));
-}
-// f is derivative of activation function
-double f(double x) {
-	double y = F(x);
-	return y*(1.0 - y);
-}
-
-// remember L is the number of layers
-
-// each element of weights is a pointer to a 2D array (the weights matrix)
-double *weights[L];
-
-// each element of biases is a pointer to a 1D array (the bias vector)
-double *biases[L];
-
-// randomly initialize weights and biases
-void init_weights_and_biases() {
-	for (int i = 1; i < L; i++) {
-		weights[i] = malloc(layer_sizes[i] * layer_sizes[i-1] * sizeof(double));
+// ==== MEMORY MANAGEMENT ====
+void initialize_vars() {
+	for (int i = 0; i < L; i++) {
+		if (i > 0) {
+			weights[i] = malloc(layer_sizes[i] * layer_sizes[i-1] * sizeof(double));
+			weight_derivs[i] = malloc(layer_sizes[i] * layer_sizes[i-1] * sizeof(double));
+		}
+		else {
+			weights[0] = NULL;
+			weight_derivs[0] = NULL;
+		}
 		biases[i] = malloc(layer_sizes[i] * sizeof(double));
+		errors[i] = malloc(layer_sizes[i] * sizeof(double));
+		affine_outputs[i] = malloc(layer_sizes[i] * sizeof(double));
+		activations[i] = malloc(layer_sizes[i] * sizeof(double));
+		bias_derivs[i] = malloc(layer_sizes[i] * sizeof(double));
 		for (int j = 0; j < layer_sizes[i]; j++) {
-			biases[i][j] = gen_normal();
+			biases[i][j] = randn();
 			for (int k = 0; k < layer_sizes[i-1]; k++) {
-				weights[i][j*layer_sizes[i-1] + k] = gen_normal();
+				weights[i][j*layer_sizes[i-1] + k] = randn();
 			}
 		}
 	}
 }
 
-void clean_weights_and_biases() {
+void clean_memory() {
 	for (int i = 0; i < L; i++) {
 		free(weights[i]);
 		free(biases[i]);
+		free(errors[i]);
+		free(affine_outputs[i]);
+		free(activations[i]);
+		free(weight_derivs[i]);
+		free(bias_derivs[i]);
 	}
 }
 
-// compute the output on neural network of input vector x, store in res 
-// if training is true, it'll store all of the "affine outputs" from each layer, i.e., the thing that goes into the activation function in outputs
-void feedforward(const double *x, double *res, bool training, double *outputs[L]) {
-	double *tmp = malloc(layer_sizes[0] * sizeof(double));
-	for (int i = 0; i < layer_sizes[0]; i++) {
-		tmp[i] = x[i];
-		if (training) outputs[0][i] = x[i];
+// ==== APPLICATION ====
+void feedforward(double *x) {
+	for (int i = 0; i < INPUT_SIZE; i++) {
+		activations[0][i] = x[i];
+		affine_outputs[0][i] = x[i];
 	}
-	double *y = NULL;
 	for (int i = 1; i < L; i++) {
-		if (!training) {
-			free(y);
-			y = malloc(layer_sizes[i] * sizeof(double));
-		}
-		else y = outputs[i];
-		matmul(layer_sizes[i], layer_sizes[i-1], 1, weights[i], tmp, y);
+		matmul(layer_sizes[i], layer_sizes[i-1], 1, weights[i], activations[i-1], affine_outputs[i]);
 		for (int j = 0; j < layer_sizes[i]; j++) {
-			y[j] += biases[i][j];
-		}
-		free(tmp);
-		tmp = malloc(layer_sizes[i] * sizeof(double));
-		for (int j = 0; j < layer_sizes[i]; j++) {
-			tmp[j] = F(y[j]);
+			affine_outputs[i][j] += biases[i][j];
+			activations[i][j] = f(affine_outputs[i][j]);
 		}
 	}
-	// at the end, tmp holds the final result so copy into res
-	for (int i = 0; i < layer_sizes[L-1]; i++) {
-		res[i] = tmp[i];
-	}
-	free(tmp);
-	if (!training) free(y);
 }
 
-// implements the backpropagation algorithm
-// answer is the correct output for the input vector x
-// takes in array of affine outputs from each layer, same as what feedforward outputs
-// (weight/bias)_derivs store (del C)/(del weight/bias). they're the same shape as weights/biases 
-// they accumulate in the above to make calculating average gradient easier
-// same shape as weights and biases, resp.
-void calc_gradients(double *answer, double *outputs[L], double *weight_derivs[L], double *bias_derivs[L]) {
-	double *error = NULL;
+// extract most probable digit
+int extract(double *arr) {
+	int ans = 0;
+	double best = 0;
+	for (int i = 0; i < OUTPUT_SIZE; i++) {
+		if (arr[i] > best) {
+			best = arr[i];
+			ans = i;
+		}
+	}
+	return ans;
+}
+
+int inference(double *x) {
+	feedforward(x);
+	return extract(activations[L-1]);
+}
+
+// ==== LEARNING ====
+void backprop(double *truth) {
 	for (int i = L-1; i >= 1; i--) {
-		double *error2 = malloc(layer_sizes[i] * sizeof(double));
 		if (i == L-1) {
-			for (int j = 0; j < layer_sizes[L-1]; j++) {
-				error2[j] = F(outputs[L-1][j]) - answer[j];
+			for (int j = 0; j < OUTPUT_SIZE; j++) {
+				errors[L-1][j] = cost_deriv(truth[j], activations[L-1][j]);
 			}
 		}
 		else {
-			matmul(1, layer_sizes[i+1], layer_sizes[i], error, weights[i+1], error2);
+			matmul(1, layer_sizes[i+1], layer_sizes[i], errors[i+1], weights[i+1], errors[i]);
 		}
 		for (int j = 0; j < layer_sizes[i]; j++) {
-			error2[j] *= f(outputs[i][j]);
-		}
-		// compute derivatives w.r.t weights/biases
-		for (int j = 0; j < layer_sizes[i]; j++) {
+			errors[i][j] *= fp(affine_outputs[i][j]);
+			bias_derivs[i][j] += errors[i][j];
 			for (int k = 0; k < layer_sizes[i-1]; k++) {
-				weight_derivs[i][j*layer_sizes[i-1] + k] += error2[j] * ((i > 1) ? F(outputs[i-1][k]) : outputs[i-1][k]);
-			}
-			bias_derivs[i][j] += error2[j];
-		}
-		free(error);
-		error = error2;
-	}
-	free(error);
-}
-
-// returns most probable digit for x
-int inference(double *x) {
-	double *res = malloc(layer_sizes[L-1] * sizeof(double));
-	feedforward(x, res, false, NULL);
-	int idx = 0;
-	double best = 0;
-	for (int i = 0; i < layer_sizes[L-1]; i++) {
-		if (res[i] > best) {
-			best = res[i];
-			idx = i;
-		}
-	}
-	return idx;
-}
-
-// evaluate on testing data
-// returns number of correct responses
-int test() {
-	int actual_cnts[10];
-	int cnts[10];
-	memset(actual_cnts, 0, sizeof(cnts));
-	memset(cnts, 0, sizeof(cnts));
-	int correct = 0;
-	double loss = 0;
-	for (int i = 0; i < TESTING_SIZE; i++) {
-		int actual_ans = 0;
-		double best = 0;
-		for (int j = 0; j < OUTPUT_SIZE; j++) {
-			if (testing_data[i].output[j] > best) {
-				best = testing_data[i].output[j];
-				actual_ans = j;
+				weight_derivs[i][j * layer_sizes[i-1] + k] += errors[i][j] * activations[i-1][k];
 			}
 		}
-		double *outvec = malloc(layer_sizes[L-1] * sizeof(double));
-		feedforward(testing_data[i].input, outvec, false, NULL);
-		int res = 0;
-		best = 0;
-		for (int j= 0; j < layer_sizes[L-1]; j++) {
-			double diff = (outvec[j] - testing_data[i].output[j]);
-			loss += (diff * diff);
-			if (outvec[j] > best) {
-				best = outvec[j];
-				res = j;
-			}
-		}
-		correct += (res == actual_ans);
-		actual_cnts[actual_ans]++;
-		cnts[res]++;
 	}
-	printf("Loss: %f\n", loss/TESTING_SIZE);
-	printf("Actual distribution: ");
-	for (int i = 0; i < 10; i++) printf("%d ", actual_cnts[i]);
-	printf("\nOutput distribution: ");
-	for (int i = 0; i < 10; i++) printf("%d ", cnts[i]);
-	printf("\n");
-	return correct;
 }
 
-// implement stochastic gradient descent for one epoch
 void epoch() {
-	// randomly shuffle training data
-	for (int i = TRAINING_SIZE-1; i >= 1; i--) {
+	// shuffle training data
+	for (int i = TRAIN_SIZE - 1; i >= 1; i--) {
 		int j = rand() % i;
-		struct Datum tmp = training_data[i];
-		training_data[i] = training_data[j];
-		training_data[j] = tmp;
+		struct Datum tmp = train_data[i];
+		train_data[i] = train_data[j];
+		train_data[j] = tmp;
 	}
 
-	// initialize stuff
-	double *outputs[L];
-	double *weight_derivs[L];
-	double *bias_derivs[L];
-	for (int i = 0; i < L; i++) {
-		outputs[i] = malloc(layer_sizes[i] * sizeof(double));
-		if (i > 0) bias_derivs[i] = malloc(layer_sizes[i] * sizeof(double));
-		if (i > 0) weight_derivs[i] = malloc(layer_sizes[i] * layer_sizes[i-1] * sizeof(double));
-	}
 	// do batches
-	double *res = malloc(layer_sizes[L-1] * sizeof(double));
-	for (int i = 0; i < TRAINING_SIZE; i += BATCH_SIZE) {
-		// zero out
+	for (int i = 0; i < TRAIN_SIZE; i += BATCH_SIZE) {
 		for (int j = 0; j < L; j++) {
-			memset(outputs[j], 0, layer_sizes[j] * sizeof(double));
-			if (j > 0) memset(bias_derivs[j], 0, layer_sizes[j] * sizeof(double));
 			if (j > 0) memset(weight_derivs[j], 0, layer_sizes[j] * layer_sizes[j-1] * sizeof(double));
+			memset(bias_derivs[j], 0, layer_sizes[j] * sizeof(double));
 		}
-		for (int j = i; j < TRAINING_SIZE && j < i + BATCH_SIZE; j++) {
-			feedforward(training_data[j].input, res, true, outputs);
-			calc_gradients(training_data[j].output, outputs, weight_derivs, bias_derivs);
-
+		for (int j = i; j < TRAIN_SIZE && j < i + BATCH_SIZE; j++) {
+			feedforward(train_data[j].input);
+			backprop(train_data[j].output);
 		}
-		double factor = (ETA / BATCH_SIZE);
+		double factor = ETA / BATCH_SIZE;
 		for (int j = 1; j < L; j++) {
 			for (int k = 0; k < layer_sizes[j]; k++) {
-				biases[j][k] -= (factor * bias_derivs[j][k]);
+				biases[j][k] -= factor * bias_derivs[j][k];
+				for (int l = 0; l < layer_sizes[j-1]; l++) {
+					weights[j][k*layer_sizes[j-1] + l] -= factor * weight_derivs[j][k*layer_sizes[j-1] + l];
+				}
 			}
-			for (int k = 0; k < layer_sizes[j] * layer_sizes[j-1]; k++) {
-				weights[j][k] -= (factor * weight_derivs[j][k]);
-			}
-		}
-		//for (int j = 1; j < L; j++) {
-		//	for (int k = 0; k < layer_sizes[j] * layer_sizes[j-1]; k++) {
-		//		printf("%f ", weight_derivs[j][k]);
-		//	}
-		//	printf("\n\n\n\n");
-		//}
-	}
-	const double EPS = 1e-10;
-	bool zero = true;
-	for (int i = 1; i < L; i++) {
-		for (int j = 0; j < layer_sizes[i] * layer_sizes[i-1]; j++) {
-			if (weight_derivs[i][j] > EPS) zero = false;
-		}
-		for (int j = 0; j < layer_sizes[i]; j++) {
-			if (bias_derivs[i][j] > EPS) zero = false;
 		}
 	}
-	if (zero) {
-		printf("ZERO!!!!\n");
+}
+
+// ==== TRAIN AND TEST ====
+void test() {
+	double loss = 0;
+	int correct = 0;
+	for (int i = 0; i < TEST_SIZE; i++) {
+		feedforward(test_data[i].input);
+		correct += (extract(activations[L-1]) == extract(test_data[i].output));
+		loss += cost(test_data[i].output, activations[L-1]);
 	}
-	free(res);
-	for (int i = 0; i < L; i++) {
-		free(outputs[i]);
-		if (i > 0) free(bias_derivs[i]);
-		if (i > 0) free(weight_derivs[i]);
-	}
+	loss /= TEST_SIZE;
+	printf("CORRECT: %d/%d || LOSS: %f\n", correct, TEST_SIZE, loss);
 }
 
 void train() {
 	for (int i = 1; i <= EPOCHS; i++) {
-		printf("Epoch %d/%d: ", i, EPOCHS);
+		printf("EPOCH %d/%d || ", i, EPOCHS);
 		epoch();
-		//test(); 
-		int correct = test();
-		printf("%d/%d \n", correct, TESTING_SIZE);
+		test();
 	}
 }
 
 int main() {
-	srand(time(NULL));
-
-	double A[6] = {6, 4, 9, 6, 3, 3};
-	double B[8] = {6, 1, 7, 7, 3, 1, 9, 1};
-	double C[12];
-	matmul(3, 2, 4, A, B, C);
-	for (int i = 0; i < 12; i++) printf("%f ", C[i]);
-	printf("\n");
-
-	init_data();
-	printf("Data initialized\n");
-
-	init_weights_and_biases();
-	printf("Weights and biases initialized\n");
-
-	int correct = test();
-	printf("Original score: %d/%d\n", correct, TESTING_SIZE);
-
+	srand(0);
+	initialize_vars();
+	printf("Global variables initialized\n");
+	load_data();
+	printf("Data loaded\n");
+	printf("Initial run || ");
+	test();
 	train();
-
-	clean_weights_and_biases();
-	return 0;
+	clean_memory();
 }
