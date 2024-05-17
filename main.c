@@ -21,7 +21,7 @@
 #define TESTING_SIZE 10000
 
 //int layer_sizes[L] = {INPUT_SIZE, 30, OUTPUT_SIZE};
-int layer_sizes[L] = {INPUT_SIZE, 100, OUTPUT_SIZE};
+int layer_sizes[L] = {INPUT_SIZE, 30, OUTPUT_SIZE};
 
 struct Datum {
 	double input[INPUT_SIZE];
