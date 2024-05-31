@@ -52,14 +52,14 @@ double randn() {
 }
 
 // ==== COST AND ACTIVATION ====
+// let's use cross-entropy
 double cost(const double *truth, const double *activation) {
 	double ans = 0;
 	double diff;
 	for (int i = 0; i < OUTPUT_SIZE; i++) {
-		diff = activation[i] - truth[i];
-		ans += 0.5*diff*diff;
+		ans += (truth[i]*log(activation[i]) + (1-truth[i])*log(1-activation[i]));
 	}
-	return ans;
+	return -1*ans;
 }
 
 // derivative of cost w.r.t one activation
@@ -209,7 +209,7 @@ void backprop(double *truth) {
 			matmul(1, layer_sizes[i+1], layer_sizes[i], errors[i+1], weights[i+1], errors[i]);
 		}
 		for (int j = 0; j < layer_sizes[i]; j++) {
-			errors[i][j] *= fp(affine_outputs[i][j]);
+			if (i < L-1) errors[i][j] *= fp(affine_outputs[i][j]);
 			bias_derivs[i][j] += errors[i][j];
 			for (int k = 0; k < layer_sizes[i-1]; k++) {
 				weight_derivs[i][j * layer_sizes[i-1] + k] += errors[i][j] * activations[i-1][k];
