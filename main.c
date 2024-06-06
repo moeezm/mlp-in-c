@@ -3,6 +3,8 @@
 #include <string.h>
 #include <time.h>
 #include <math.h>
+#include <assert.h>
+#include <stdbool.h>
 
 // ==== CONSTANTS ====
 #define TRAIN_SIZE 60000
@@ -11,9 +13,12 @@
 // number of layers
 #define L 3
 // learning rate
-#define ETA 1.5
+#define ETA 0.25
 #define BATCH_SIZE 10
-#define EPOCHS 30
+#define EPOCHS 40
+// regularization constant
+#define LAMBDA 0.001
+#define DROPOUT_PROB 0.0
 
 #define INPUT_SIZE 784
 #define OUTPUT_SIZE 10
@@ -25,7 +30,9 @@ struct Datum {
 };
 
 // ==== GLOBAL VARIABLES ====
-const int layer_sizes[L] = {INPUT_SIZE, 30, OUTPUT_SIZE};
+bool DROPOUT = false;
+
+const int layer_sizes[L] = {INPUT_SIZE, 50, OUTPUT_SIZE};
 double *weights[L];
 double *biases[L];
 double *errors[L];
@@ -33,6 +40,7 @@ double *affine_outputs[L];
 double *activations[L];
 double *weight_derivs[L];
 double *bias_derivs[L];
+bool *dropout[L];
 
 struct Datum train_data[TRAIN_SIZE];
 struct Datum test_data[TEST_SIZE];
@@ -52,19 +60,33 @@ double randn() {
 }
 
 // ==== COST AND ACTIVATION ====
-// let's use cross-entropy
+// let's use cross-entropy with L1 regularization
 double cost(const double *truth, const double *activation) {
 	double ans = 0;
 	double diff;
 	for (int i = 0; i < OUTPUT_SIZE; i++) {
+		//assert(activation[i] >= 0 && activation[i] <= 1);
 		ans += (truth[i]*log(activation[i]) + (1-truth[i])*log(1-activation[i]));
 	}
-	return -1*ans;
+	ans *= -1;
+	// add L1 norm of weights
+	for (int i = 1; i < L; i++) {
+		for (int j = 0; j < layer_sizes[i]; j++) {
+			ans += LAMBDA * abs(weights[i][j]);
+		}
+	}
+	return ans;
 }
 
 // derivative of cost w.r.t one activation
 double cost_deriv(double truth, double activation) {
-	return activation - truth;
+	return (activation - truth)/(activation*(1-activation));
+}
+
+int sgn(double x) {
+	if (x < 0) return -1;
+	else if (x == 0) return 0;
+	else return 1;
 }
 
 // f is activation function, we'll use sigmoid
@@ -143,7 +165,9 @@ void initialize_vars() {
 		affine_outputs[i] = malloc(layer_sizes[i] * sizeof(double));
 		activations[i] = malloc(layer_sizes[i] * sizeof(double));
 		bias_derivs[i] = malloc(layer_sizes[i] * sizeof(double));
+		dropout[i] = malloc(layer_sizes[i] * sizeof(bool));
 		for (int j = 0; j < layer_sizes[i]; j++) {
+			dropout[i][j] = false;
 			biases[i][j] = randn();
 			for (int k = 0; k < layer_sizes[i-1]; k++) {
 				weights[i][j*layer_sizes[i-1] + k] = randn();
@@ -161,6 +185,7 @@ void clean_memory() {
 		free(activations[i]);
 		free(weight_derivs[i]);
 		free(bias_derivs[i]);
+		free(dropout[i]);
 	}
 }
 
@@ -173,8 +198,10 @@ void feedforward(double *x) {
 	for (int i = 1; i < L; i++) {
 		matmul(layer_sizes[i], layer_sizes[i-1], 1, weights[i], activations[i-1], affine_outputs[i]);
 		for (int j = 0; j < layer_sizes[i]; j++) {
+			if (!DROPOUT) affine_outputs[i][j] *= (1 - DROPOUT_PROB);
 			affine_outputs[i][j] += biases[i][j];
 			activations[i][j] = f(affine_outputs[i][j]);
+			if (DROPOUT && dropout[i][j]) activations[i][j] = 0;
 		}
 	}
 }
@@ -209,7 +236,8 @@ void backprop(double *truth) {
 			matmul(1, layer_sizes[i+1], layer_sizes[i], errors[i+1], weights[i+1], errors[i]);
 		}
 		for (int j = 0; j < layer_sizes[i]; j++) {
-			if (i < L-1) errors[i][j] *= fp(affine_outputs[i][j]);
+			errors[i][j] *= fp(affine_outputs[i][j]);
+			if (DROPOUT && dropout[i][j]) errors[i][j] = 0;
 			bias_derivs[i][j] += errors[i][j];
 			for (int k = 0; k < layer_sizes[i-1]; k++) {
 				weight_derivs[i][j * layer_sizes[i-1] + k] += errors[i][j] * activations[i-1][k];
@@ -227,12 +255,20 @@ void epoch() {
 		train_data[j] = tmp;
 	}
 
+	DROPOUT = true;
 	// do batches
 	for (int i = 0; i < TRAIN_SIZE; i += BATCH_SIZE) {
 		for (int j = 0; j < L; j++) {
 			if (j > 0) memset(weight_derivs[j], 0, layer_sizes[j] * layer_sizes[j-1] * sizeof(double));
 			memset(bias_derivs[j], 0, layer_sizes[j] * sizeof(double));
 		}
+
+		for (int i = 1; i < L-1; i++) {
+			for (int j = 0; j < layer_sizes[i]; j++) {
+				dropout[i][j] = (randu() < DROPOUT_PROB);
+			}
+		}
+
 		for (int j = i; j < TRAIN_SIZE && j < i + BATCH_SIZE; j++) {
 			feedforward(train_data[j].input);
 			backprop(train_data[j].output);
@@ -242,42 +278,58 @@ void epoch() {
 			for (int k = 0; k < layer_sizes[j]; k++) {
 				biases[j][k] -= factor * bias_derivs[j][k];
 				for (int l = 0; l < layer_sizes[j-1]; l++) {
-					weights[j][k*layer_sizes[j-1] + l] -= factor * weight_derivs[j][k*layer_sizes[j-1] + l];
+					weights[j][k*layer_sizes[j-1] + l] -= factor * weight_derivs[j][k*layer_sizes[j-1] + l] + (LAMBDA * factor) * sgn(weights[j][k*layer_sizes[j-1] + l]);
 				}
 			}
 		}
 	}
+	DROPOUT = false;
 }
 
 // ==== TRAIN AND TEST ====
-void test() {
+void test(struct Datum dataset[], int sz) {
 	double loss = 0;
 	int correct = 0;
 	for (int i = 0; i < TEST_SIZE; i++) {
-		feedforward(test_data[i].input);
-		correct += (extract(activations[L-1]) == extract(test_data[i].output));
-		loss += cost(test_data[i].output, activations[L-1]);
+		feedforward(dataset[i].input);
+		correct += (extract(activations[L-1]) == extract(dataset[i].output));
+		loss += cost(dataset[i].output, activations[L-1])/sz;
 	}
-	loss /= TEST_SIZE;
-	printf("CORRECT: %d/%d || LOSS: %f\n", correct, TEST_SIZE, loss);
+	//loss /= TEST_SIZE;
+	printf("CORRECT: %d/%d || LOSS: %f", correct, sz, loss);
 }
 
 void train() {
 	for (int i = 1; i <= EPOCHS; i++) {
 		printf("EPOCH %d/%d || ", i, EPOCHS);
+		printf("TRAIN ");
 		epoch();
-		test();
+		test(train_data, TRAIN_SIZE);
+		printf(" || TEST ");
+		test(test_data, TEST_SIZE);
+		double l1norm = 0;
+		for (int l = 1; l < L; l++) {
+			for (int i = 0; i < layer_sizes[l]; i++) {
+				for (int j = 0; j < layer_sizes[l-1]; j++) {
+					l1norm += abs(weights[l][i*layer_sizes[l-1] + j]);
+				}
+			}
+		}
+		printf(" || L1 NORM OF WEIGHTS %f", l1norm);
+		printf("\n");
 	}
 }
 
 int main() {
+	printf("%f\n", log(0));
 	srand(0);
 	initialize_vars();
 	printf("Global variables initialized\n");
 	load_data();
 	printf("Data loaded\n");
-	printf("Initial run || ");
-	test();
+	printf("Initial run (on train data) || ");
+	test(train_data, TRAIN_SIZE);
+	printf("\n");
 	train();
 	clean_memory();
 }
